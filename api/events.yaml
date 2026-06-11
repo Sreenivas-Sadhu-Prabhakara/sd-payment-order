@@ -1,0 +1,24 @@
+# Event contract — owned by THIS repo. Topic catalog: bian-platform/platform-infra/kafka/topics.yaml
+service: sd-payment-order
+publishes:
+  - topic: bian.payments.payment-order   # FLAGSHIP PAYMENTS FLOW
+    events:
+      - type: payment-order.accepted
+        payload: [orderId, debtorAccountRef, creditorAccountRef, amountMinor, currency]
+      - type: payment-order.rejected
+        payload: [orderId, reason]
+      - type: payment-order.submitted     # consumed by sd-payment-execution
+        payload: [orderId, debtorAccountRef, creditorAccountRef, amountMinor, currency]
+      - type: payment-order.completed
+        payload: [orderId, reason]
+      - type: payment-order.failed
+        payload: [orderId, reason]
+      - type: payment-order.cancelled
+        payload: [orderId]
+consumes:
+  - topic: bian.payments.payment-execution
+    events:
+      - type: payment.completed           # → PUT /{orderId}/execution-result
+        from: sd-payment-execution
+      - type: payment.failed
+        from: sd-payment-execution

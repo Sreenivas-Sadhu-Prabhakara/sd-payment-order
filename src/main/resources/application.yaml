@@ -14,7 +14,7 @@ management:
   endpoint:
     health:
       probes:
-        enabled: true   # /actuator/health/liveness + /readiness for K8s probes
+        enabled: true
   info:
     env:
       enabled: true
@@ -27,6 +27,15 @@ info:
     functionalPattern: "Process"
     assetType: "Payment Order"
     controlRecord: "Payment Order Procedure"
+    phase: "2b-deep"
+
+bian:
+  payments:
+    # Per-order ceiling; above it the order is REJECTED at intake.
+    max-order-minor: 50000000      # ₹500,000 in paise
+    # Valid orders hand off to Payment Execution immediately. Set false to hold
+    # orders in VALIDATED for an explicit POST /{id}/submit step.
+    auto-submit: true
 
 resilience4j:
   circuitbreaker:

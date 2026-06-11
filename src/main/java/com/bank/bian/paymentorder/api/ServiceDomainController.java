@@ -1,8 +1,8 @@
 package com.bank.bian.paymentorder.api;
 
-import com.bank.bian.paymentorder.model.ControlRecord;
-import com.bank.bian.paymentorder.service.ControlRecordStore;
-import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import com.bank.bian.paymentorder.domain.DomainException;
+import com.bank.bian.paymentorder.domain.PaymentOrder;
+import com.bank.bian.paymentorder.domain.PaymentOrderService;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
@@ -11,24 +11,21 @@ import java.util.Collection;
 import java.util.Map;
 
 /**
- * BIAN semantic API for the "Payment Order" service domain.
+ * BIAN semantic API for "Payment Order" — Phase 2b-c, real domain.
+ * Control record: Payment Order Procedure.
  *
- * Endpoints follow the BIAN action-term style:
- *   GET  /v1/service-domain                          → who am I (SD metadata)
- *   POST /v1/payment-order-procedure/initiate                    → Initiate a control record
- *   GET  /v1/payment-order-procedure                             → Retrieve (list)
- *   GET  /v1/payment-order-procedure/{crId}/retrieve             → Retrieve (single)
- *   PUT  /v1/payment-order-procedure/{crId}/update               → Update
- *   PUT  /v1/payment-order-procedure/{crId}/control              → Control (suspend|resume|terminate)
+ * Contract: api/openapi.yaml (owned by this repo).
  */
 @RestController
 @RequestMapping("/v1")
 public class ServiceDomainController {
 
-    private final ControlRecordStore store;
+    static final String CR = "payment-order-procedure";
 
-    public ServiceDomainController(ControlRecordStore store) {
-        this.store = store;
+    private final PaymentOrderService service;
+
+    public ServiceDomainController(PaymentOrderService service) {
+        this.service = service;
     }
 
     @GetMapping("/service-domain")
@@ -40,46 +37,51 @@ public class ServiceDomainController {
                 "functionalPattern", "Process",
                 "assetType", "Payment Order",
                 "controlRecord", "Payment Order Procedure",
-                "version", "0.1.0",
-                "phase", "1-shallow"
+                "version", "0.2.0",
+                "phase", "2b-deep"
         );
     }
 
-    @PostMapping("/payment-order-procedure/initiate")
-    @CircuitBreaker(name = "serviceDomain")
-    public ResponseEntity<ControlRecord> initiate(@RequestBody(required = false) Map<String, Object> properties) {
-        return ResponseEntity.status(HttpStatus.CREATED).body(store.initiate(properties));
+    public record OrderRequest(String debtorAccountRef, String creditorAccountRef,
+                               long amountMinor, String currency, String remittanceInfo) {}
+
+    @PostMapping("/" + CR + "/initiate")
+    public ResponseEntity<PaymentOrder> initiate(@RequestBody OrderRequest req) {
+        PaymentOrder order = service.initiate(req.debtorAccountRef(), req.creditorAccountRef(),
+                req.amountMinor(), req.currency(), req.remittanceInfo());
+        // REJECTED is still a created resource — the order exists with its reason
+        return ResponseEntity.status(HttpStatus.CREATED).body(order);
     }
 
-    @GetMapping("/payment-order-procedure")
-    public Collection<ControlRecord> list() {
-        return store.list();
+    @GetMapping("/" + CR)
+    public Collection<PaymentOrder> list() {
+        return service.list();
     }
 
-    @GetMapping("/payment-order-procedure/{crId}/retrieve")
-    public ResponseEntity<ControlRecord> retrieve(@PathVariable String crId) {
-        return store.retrieve(crId)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+    @GetMapping("/" + CR + "/{orderId}/retrieve")
+    public PaymentOrder retrieve(@PathVariable String orderId) {
+        return service.retrieve(orderId);
     }
 
-    @PutMapping("/payment-order-procedure/{crId}/update")
-    public ResponseEntity<ControlRecord> update(@PathVariable String crId,
-                                                @RequestBody Map<String, Object> properties) {
-        return store.update(crId, properties)
-                .map(ResponseEntity::ok)
-                .orElse(ResponseEntity.notFound().build());
+    /** Explicit submission — only relevant when bian.payments.auto-submit=false. */
+    @PostMapping("/" + CR + "/{orderId}/submit")
+    public PaymentOrder submit(@PathVariable String orderId) {
+        return service.submit(orderId);
     }
 
-    @PutMapping("/payment-order-procedure/{crId}/control")
-    public ResponseEntity<?> control(@PathVariable String crId,
-                                     @RequestBody Map<String, String> body) {
-        try {
-            return store.control(crId, body.get("action"))
-                    .<ResponseEntity<?>>map(ResponseEntity::ok)
-                    .orElse(ResponseEntity.notFound().build());
-        } catch (IllegalArgumentException e) {
-            return ResponseEntity.badRequest().body(Map.of("error", e.getMessage()));
+    @PutMapping("/" + CR + "/{orderId}/control")
+    public PaymentOrder control(@PathVariable String orderId, @RequestBody Map<String, String> body) {
+        if (!"cancel".equalsIgnoreCase(body.getOrDefault("action", ""))) {
+            throw DomainException.invalid("UNKNOWN_ACTION", "supported control action: cancel");
         }
+        return service.cancel(orderId);
+    }
+
+    /** Outcome callback from Payment Execution. */
+    @PutMapping("/" + CR + "/{orderId}/execution-result")
+    public PaymentOrder executionResult(@PathVariable String orderId,
+                                        @RequestBody Map<String, Object> body) {
+        boolean completed = Boolean.TRUE.equals(body.get("completed"));
+        return service.applyExecutionResult(orderId, completed, (String) body.get("reason"));
     }
 }

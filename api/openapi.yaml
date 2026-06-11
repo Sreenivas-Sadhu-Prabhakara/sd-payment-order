@@ -1,182 +1,174 @@
-# Design-time API contract for this service domain — owned BY this repo
-# (contract-per-repo, Netflix-style; no central contracts repo).
-# The runtime spec served at /v3/api-docs must stay compatible with this file;
-# Phase 2 adds contract tests that enforce it.
+# API contract — owned by THIS repo (contract-per-repo). Phase 2b-c: real domain.
 openapi: 3.0.3
 info:
   title: "Payment Order — BIAN Semantic API"
   description: >
-    BIAN Service Domain 'Payment Order' (functional pattern: Process,
-    business area: Operations and Execution) operating on the
-    'Payment Order Procedure' control record.
-  version: 0.1.0
+    BIAN Service Domain 'Payment Order' (Process) on the 'Payment Order
+    Procedure' control record — payment intake, validation, and routing to
+    Payment Execution. States: RECEIVED → VALIDATED → SUBMITTED →
+    COMPLETED | FAILED; REJECTED at validation; CANCELLED only before the
+    execution hand-off.
+  version: 0.2.0
 servers:
   - url: /
-    description: direct (in-cluster)
   - url: /sd-payment-order
-    description: through the platform gateway (prefix is rewritten away)
-tags:
-  - name: service-domain
-  - name: control-record
+    description: through the platform gateway
 
 paths:
   /v1/service-domain:
     get:
-      tags: [service-domain]
       operationId: getServiceDomain
       summary: Service domain metadata
       responses:
-        "200":
-          description: SD identity and BIAN classification
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ServiceDomainInfo"
+        "200": { description: SD identity and BIAN classification }
 
   /v1/payment-order-procedure/initiate:
     post:
-      tags: [control-record]
-      operationId: initiate
-      summary: "BIAN action term: Initiate"
+      operationId: initiateOrder
+      summary: "Initiate — receive + validate a payment order (auto-submits when valid)"
       requestBody:
-        required: false
+        required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/Properties"
+              type: object
+              required: [debtorAccountRef, creditorAccountRef, amountMinor]
+              properties:
+                debtorAccountRef: { type: string }
+                creditorAccountRef: { type: string }
+                amountMinor: { type: integer, format: int64, minimum: 1 }
+                currency: { type: string, pattern: "^[A-Z]{3}$", default: INR }
+                remittanceInfo: { type: string }
       responses:
         "201":
-          description: Control record created
+          description: >
+            Order created — status SUBMITTED (valid, auto-submit on),
+            VALIDATED (auto-submit off) or REJECTED (with statusReason).
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/ControlRecord"
+              schema: { $ref: "#/components/schemas/PaymentOrder" }
 
   /v1/payment-order-procedure:
     get:
-      tags: [control-record]
-      operationId: list
-      summary: "BIAN action term: Retrieve (collection)"
+      operationId: listOrders
+      summary: Retrieve (collection)
       responses:
         "200":
-          description: All control records
+          description: All orders
           content:
             application/json:
               schema:
                 type: array
-                items:
-                  $ref: "#/components/schemas/ControlRecord"
+                items: { $ref: "#/components/schemas/PaymentOrder" }
 
-  /v1/payment-order-procedure/{crId}/retrieve:
+  /v1/payment-order-procedure/{orderId}/retrieve:
     get:
-      tags: [control-record]
-      operationId: retrieve
-      summary: "BIAN action term: Retrieve"
-      parameters:
-        - $ref: "#/components/parameters/CrId"
+      operationId: retrieveOrder
+      summary: Retrieve
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
       responses:
         "200":
-          description: The control record
+          description: The order
           content:
             application/json:
-              schema:
-                $ref: "#/components/schemas/ControlRecord"
-        "404":
-          description: Unknown control record id
+              schema: { $ref: "#/components/schemas/PaymentOrder" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
-  /v1/payment-order-procedure/{crId}/update:
+  /v1/payment-order-procedure/{orderId}/submit:
+    post:
+      operationId: submitOrder
+      summary: "Execute — hand off to Payment Execution (needed only with auto-submit off)"
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
+      responses:
+        "200": { description: Order SUBMITTED }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/RuleViolation" }
+
+  /v1/payment-order-procedure/{orderId}/control:
     put:
-      tags: [control-record]
-      operationId: update
-      summary: "BIAN action term: Update"
-      parameters:
-        - $ref: "#/components/parameters/CrId"
+      operationId: cancelOrder
+      summary: "Control — cancel (only before the execution hand-off)"
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/Properties"
+              type: object
+              required: [action]
+              properties:
+                action: { type: string, enum: [cancel] }
       responses:
-        "200":
-          description: Updated control record
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ControlRecord"
-        "404":
-          description: Unknown control record id
+        "200": { description: Order CANCELLED }
+        "400": { $ref: "#/components/responses/Invalid" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/RuleViolation" }
 
-  /v1/payment-order-procedure/{crId}/control:
+  /v1/payment-order-procedure/{orderId}/execution-result:
     put:
-      tags: [control-record]
-      operationId: control
-      summary: "BIAN action term: Control (suspend | resume | terminate)"
-      parameters:
-        - $ref: "#/components/parameters/CrId"
+      operationId: applyExecutionResult
+      summary: "Outcome callback from Payment Execution (SUBMITTED orders only)"
+      parameters: [{ $ref: "#/components/parameters/OrderId" }]
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: "#/components/schemas/ControlAction"
+              type: object
+              required: [completed]
+              properties:
+                completed: { type: boolean }
+                reason: { type: string }
       responses:
-        "200":
-          description: Control applied
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/ControlRecord"
-        "400":
-          description: Unknown control action
-        "404":
-          description: Unknown control record id
+        "200": { description: Order COMPLETED or FAILED }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/RuleViolation" }
 
 components:
   parameters:
-    CrId:
-      name: crId
+    OrderId:
+      name: orderId
       in: path
       required: true
-      schema:
-        type: string
-      description: Control record identifier (CR-…)
+      schema: { type: string }
+
+  responses:
+    NotFound:
+      description: Unknown order
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RuleViolation:
+      description: State forbids this (already submitted, terminal, not validated…)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Invalid:
+      description: Bad input
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
-    ServiceDomainInfo:
+    PaymentOrder:
       type: object
       properties:
-        serviceDomain: { type: string, example: "Payment Order" }
-        businessArea: { type: string, example: "Operations and Execution" }
-        businessDomain: { type: string, example: "Payments" }
-        functionalPattern: { type: string, example: "Process" }
-        assetType: { type: string, example: "Payment Order" }
-        controlRecord: { type: string, example: "Payment Order Procedure" }
-        version: { type: string }
-        phase: { type: string }
-
-    ControlRecord:
-      type: object
-      properties:
-        controlRecordId: { type: string, example: "CR-7f3a…" }
-        controlRecordType: { type: string, example: "Payment Order Procedure" }
+        orderId: { type: string, example: "PO-…" }
+        debtorAccountRef: { type: string }
+        creditorAccountRef: { type: string }
+        amountMinor: { type: integer, format: int64 }
+        currency: { type: string }
+        remittanceInfo: { type: string, nullable: true }
         status:
           type: string
-          enum: [INITIATED, ACTIVE, SUSPENDED, TERMINATED]
-        createdAt: { type: string, format: date-time }
-        updatedAt: { type: string, format: date-time }
-        properties:
-          $ref: "#/components/schemas/Properties"
+          enum: [RECEIVED, VALIDATED, REJECTED, SUBMITTED, COMPLETED, FAILED, CANCELLED]
+        statusReason: { type: string, nullable: true }
+        receivedAt: { type: string, format: date-time }
+        submittedAt: { type: string, format: date-time, nullable: true }
+        finishedAt: { type: string, format: date-time, nullable: true }
 
-    Properties:
+    Error:
       type: object
-      additionalProperties: true
-      description: Free-form domain properties (Phase 2 replaces with the real per-domain schema)
-
-    ControlAction:
-      type: object
-      required: [action]
       properties:
-        action:
-          type: string
-          enum: [suspend, resume, terminate]
+        code: { type: string, example: ALREADY_SUBMITTED }
+        message: { type: string }
