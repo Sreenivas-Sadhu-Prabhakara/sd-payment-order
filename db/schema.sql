@@ -14,7 +14,10 @@ CREATE TABLE IF NOT EXISTS payment_order (
     received_at         TIMESTAMPTZ  NOT NULL,
     submitted_at        TIMESTAMPTZ,
     finished_at         TIMESTAMPTZ,
-    CONSTRAINT no_self_transfer CHECK (debtor_account_ref <> creditor_account_ref),
+    -- A self-transfer may exist ONLY as a REJECTED audit record (the service
+    -- creates rejected orders as queryable resources); it can never execute.
+    CONSTRAINT no_self_transfer
+        CHECK (debtor_account_ref <> creditor_account_ref OR status = 'REJECTED'),
     CONSTRAINT submitted_has_timestamp
         CHECK (status NOT IN ('SUBMITTED','COMPLETED','FAILED') OR submitted_at IS NOT NULL)
 );
