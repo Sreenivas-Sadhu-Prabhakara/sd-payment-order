@@ -117,12 +117,21 @@ public class PaymentOrderService {
     // ── submission hand-off ──────────────────────────────────────────────────
 
     public PaymentOrder submit(String orderId) {
-        return withLock(orderId, order -> {
+        PaymentOrder submitted = withLock(orderId, order -> {
             if (order.getStatus() != PaymentOrder.Status.VALIDATED) {
                 throw DomainException.rule("NOT_VALIDATED",
                         "submit requires VALIDATED (status: " + order.getStatus() + ")");
             }
-            executionClient.submit(order);
+            ExecutionClient.SubmitResult result = executionClient.submit(order);
+            if (!result.handedOff()) {
+                // 2d-ii: hand-off transport failed — stay VALIDATED (retryable,
+                // still cancellable). Never pretend the order is with execution.
+                order.setStatusReason(result.reason());
+                repository.save(order);
+                events.publish(DomainEvent.of(TOPIC_ORDERS, "payment-order.handoff-failed",
+                        Map.of("orderId", orderId, "reason", String.valueOf(result.reason()))));
+                return order;
+            }
             order.setStatus(PaymentOrder.Status.SUBMITTED);
             order.setSubmittedAt(clock.instant());
             repository.save(order);
@@ -132,8 +141,14 @@ public class PaymentOrderService {
                     "creditorAccountRef", order.getCreditorAccountRef(),
                     "amountMinor", order.getAmountMinor(),
                     "currency", order.getCurrency())));
+            // Synchronous adapters (HTTP → Payment Execution) return the saga's
+            // terminal outcome in-band — apply it immediately.
+            if (result.completed() != null) {
+                applyExecutionResult(orderId, result.completed(), result.reason());
+            }
             return order;
         });
+        return retrieve(submitted.getOrderId());
     }
 
     /** Cancellation — possible only before the execution hand-off. */

@@ -25,9 +25,10 @@ class PaymentOrderServiceTest {
 
     static class RecordingExecutionClient implements ExecutionClient {
         final List<String> submitted = new ArrayList<>();
-        @Override public boolean submit(PaymentOrder order) {
+        SubmitResult next = SubmitResult.handedOffOnly();
+        @Override public SubmitResult submit(PaymentOrder order) {
             submitted.add(order.getOrderId());
-            return true;
+            return next;
         }
     }
 
@@ -101,6 +102,39 @@ class PaymentOrderServiceTest {
             assertThatThrownBy(() -> s.cancel(second.getOrderId()))
                     .isInstanceOf(DomainException.class)
                     .hasMessageContaining("no longer be cancelled");
+        }
+    }
+
+    @Nested
+    class LoopClosure {
+        /** 2d-ii: a synchronous adapter (HTTP → PE) returns the outcome in-band. */
+        @Test
+        void inBandOutcomeCompletesTheOrderImmediately() {
+            execution.next = ExecutionClient.SubmitResult.outcome(true, "settled");
+            PaymentOrder o = autoSubmitService().initiate("CA-D", "CA-C", 100_000, "INR", null);
+            assertThat(o.getStatus()).isEqualTo(PaymentOrder.Status.COMPLETED);
+            assertThat(events.types()).containsExactly(
+                    "payment-order.accepted", "payment-order.submitted", "payment-order.completed");
+        }
+
+        @Test
+        void inBandSagaFailureMarksFailedWithExecutionReason() {
+            execution.next = ExecutionClient.SubmitResult.outcome(false, "CREDIT_FAILED:account closed");
+            PaymentOrder o = autoSubmitService().initiate("CA-D", "CA-C", 100_000, "INR", null);
+            assertThat(o.getStatus()).isEqualTo(PaymentOrder.Status.FAILED);
+            assertThat(o.getStatusReason()).contains("CREDIT_FAILED");
+        }
+
+        @Test
+        void transportFailureKeepsOrderValidatedAndRetryable() {
+            execution.next = ExecutionClient.SubmitResult.failed("EXECUTION_UNREACHABLE: timeout");
+            PaymentOrderService s = autoSubmitService();
+            PaymentOrder o = s.initiate("CA-D", "CA-C", 100_000, "INR", null);
+            assertThat(o.getStatus()).isEqualTo(PaymentOrder.Status.VALIDATED);
+            assertThat(events.types()).contains("payment-order.handoff-failed");
+            // retry succeeds once the transport recovers
+            execution.next = ExecutionClient.SubmitResult.outcome(true, "settled");
+            assertThat(s.submit(o.getOrderId()).getStatus()).isEqualTo(PaymentOrder.Status.COMPLETED);
         }
     }
 
